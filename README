@@ -1,0 +1,100 @@
+// Copyright 2021 Lica Robert-Mihai <robertlica21@gmail.com>
+
+Am sa fiu generos cu explicatiile desi se poate intelege din cod foarte usor.
+Am folosit denumiri sugestive.
+
+Comenzi:
+- de build:
+make
+- de run
+make run input=<fisier_intrare>
+
+versiune g++ folosita: 4.8.4*
+* - din acest motiv nu am reusit sa rulez checker-ul si nici programul "serial"
+care necesita o biblioteca mai noua decat ce am eu. Am rulat la
+colegi cu g++ > 9.0 si am observat ca la ei apar niste warning-uri in plus si
+chiar a dat eroare la compilare la operatorul == pentru std::unique_ptr in
+versiunea mai noua de compiler. Oricum, am testat la ei si raspunsurile sunt
+corecte.
+
+Performante:
+Am rulat cu "time make run input=<fisier_in>", dar timpii sunt inutili
+deoarece nu am un base-line cum am explicat mai sus de nu am g++ destul de nou.
+Nu mai am timp sa rulez pe cluster
+
+Ar fi fost misto daca aveam si un generator de teste ca sa putem testa mai usor
+scalabilitatea, dar eu zic ca este scalabil deoarece am lucrat si distribuit si
+paralelizat.
+
+(stiu ca am o rasnita de calculator, pls nu radeti)
+
+testul 2:
+real    0m1.441s
+user    0m0.594s
+sys     0m0.766s
+
+testul 3:
+real    0m1.474s
+user    0m1.109s
+sys     0m0.859s
+
+testul 4:
+real    0m4.337s
+user    0m14.719s
+sys     0m6.516s
+
+testul 5:
+real    0m8.888s
+user    0m29.109s
+sys     0m15.484s
+
+Detaliere implementare:
+
+Master:
+Am impartit programele in Master si Workeri. Master-ul incepe, porneste 4
+thread-uri (cati Workeri exista), face o coada cu ordinea genurilor din
+fisierul de input si apoi asteapta sa dea join la thread-uri.
+Thread-urile din Master se apuca fiecare sa citeasca din fisier si cand dau de
+un paragraf cu genul caruia sunt aferente, iau paragraful si il trimit la
+worker-ul aferent. Daca e prima oara cand trimite, nu asteapta sa primeasca si
+proceseaza in continuare si va primi ulterior ce a trimis la procesat.
+Dupa ce primeste de la Worker-ul aferent, informatia fac una din 2 lucruri:
+- daca este genul curent la coada de ordine:
+[
+- - daca nu avem alte paragrafe de dinainte nescrise, scriem ce abia a venit
+- - else stocam in coada aferenta workerului si scriem ce era stocat in memorie
+]
+- else stocam in coada aferenta workerului ce tocmai a venit si vom mai incerca
+Cand se termina fisierul, anuntam procesele worker sa se inchida si fiecare
+thread incearca sa isi goleasca coada in mod concurent.
+
+Workeri:
+Pornesc, in functie de rank-ul de mpi decid despre ce gen se vor ocupa.
+Pornesc thread-ul de comunicare si P-1 thread-uri de procesare.
+-> Comunicatorul are logica asta:
+  > MPI receive
+  > imparte in chunk-uri de 20 de linii
+  > spune thread-urilor de procesare ca se pot apuca de lucrur (aka bariera)
+  > este anuntat cand workerii au terminat (aka bariera)
+  > MPI send
+  > goto "MPI receive"
+-> Threadurile de procesare:
+  > bariera
+  > incearca sa ia de lucru
+  > - reuseste: proceseaza si mai incearca sa ia
+  > - nu reuseste: spune ca a terminat
+  > bariera
+  > goto "bariera" de sus
+
+Impartirea lucrului se face foarte elegant. Am o structura share-uita intre
+thread-urile din worker si structura contine referinte la niste containere:
+std::vector<std::string> payload; // aici sunt chunk urile de 20 de linii
+std::vector<std::string> processed; // aici vor fi chunk-urile procesate
+std::atomic<int> index;
+
+Thread-urile de procesare obtin acel index si apoi il incrementeaza. Apoi daca:
+- i < payload.size(): proceseaza si salveaza in processed[i]
+- else break si intra in bariera
+
+Cand se primeste de la master o anumita informatie workerul face break si totul
+se opreste.
